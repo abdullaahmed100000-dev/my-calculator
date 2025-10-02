@@ -1,0 +1,10 @@
+print("| Welcome To calculator App |\n")
+num1= float(input("first Number : "))
+num2= float(input("Second Number : "))
+print("|-----------------------------|")
+print("Adding + : "+ str(num1+num2))
+print("Subtract - : "+ str(num1-num2))
+print("mltiply * : "+ str(num1*num2))
+print("divide / : "+ str(num1/num2))
+print("Modulus % : "+ str(num1%num2))
+
