@@ -1,0 +1,52 @@
+# برنامج الحفلة - Party Program
+# هذا البرنامج يتحقق من شروط الدخول ويطلب المشروب إذا سُمح بالدخول
+
+import sys  # لاستخدام exit() لإيقاف البرنامج
+
+print("|Welcome to our party! 🎉|\n")
+
+# السؤال الأول: هل معاك دعوة؟
+invitation = input("Do you have an invitation? (yes/No): ").lower().strip()
+
+# السؤال الثاني: هل معاك الزي الرسمي؟
+is_formal = input("Do you have formal dress? (yes/No): ").lower().strip()
+
+# التحقق من شروط الدخول
+if invitation == "yes" and is_formal == "yes":
+    print("Welcome to the party! You meet all requirements. 🎊\n")
+elif invitation == "yes" and is_formal == "no":
+    print("You can come in, but please wear formal dress next time. 😊\n")
+elif invitation == "no" or is_formal == "no":
+    print("Sorry, you can't enter because you don't have an invitation or formal dress. 🚫")
+    sys.exit()  # إيقاف البرنامج هنا - لا يستمر في التنفيذ
+else:
+    print("Sorry, invalid input. You can't enter. 🚫")
+    sys.exit()
+
+# إذا سُمح بالدخول، اسأل عن المشروب
+print("Welcome to the party! Let's get you a drink. 🥤\n")
+
+drink = input("What would you like to drink? (coffee/tea): ").lower().strip()
+
+if drink == "tea":
+    type_tea = input("What kind of tea would you like? (green/black): ").lower().strip()
+    if type_tea == "green" or type_tea == "black":
+        print("Okay, your {} tea will be ready in 5 minutes. Enjoy! ☕".format(type_tea))
+    else:
+        print("Sorry, we don't have that kind of tea. Please choose green or black.")
+        sys.exit()  # إيقاف البرنامج هنا
+
+elif drink == "coffee":
+    type_coffee = input("Would you like your coffee black or with sugar? (black/sugar): ").lower().strip()
+    if type_coffee == "black" or type_coffee == "sugar":
+        print("Okay, your {} coffee will be ready in 5 minutes. Enjoy! ☕".format(type_coffee))
+    else:
+        print("Sorry, we don't have that type of coffee. Please choose black or sugar.")
+        sys.exit()  # إيقاف البرنامج هنا
+
+else:
+    print("Sorry, we don't have that drink. Please choose coffee or tea.")
+    sys.exit()  # إيقاف البرنامج هنا
+
+# نهاية البرنامج إذا نجح كل شيء
+print("\nThank you for joining the party! Have a great time! 🎈")
