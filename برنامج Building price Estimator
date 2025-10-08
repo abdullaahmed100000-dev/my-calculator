@@ -1,0 +1,22 @@
+str_length=input("please type length : \n ")#هنا انا بطلب يداخل الطوال
+str_width=input("please type width : \n ")#هنا انا بطلب من يداخل العرض
+str_price=input("How much for 1 meter ? : \n")#هنا بقلو اعمل متغير يحفظ النص بتاع السعر
+
+#هنا انا ببدء احولهم الي float
+length=float(str_length)#كده معاي رقم الطوال
+width=float(str_width)#كده معاي راقم العرض
+price=float(str_price)#كده معاي رقم السعر
+
+
+#هنا حنا هنحسب المساحه الجماليه
+area=length * width #كده انا معاي القيمه الراقميه للمساحه الكليه
+total_price=price * area #كده انا معي القيمه الراقميه للسعر
+
+#هنا هنحول الارقام الي نصواص علشان نطبعهم
+str_area=str(area)#كده احنا حولنه من ارقم الي نص
+str_total_price=str(total_price)#كده انا حوالت السعر من راقم النص
+
+#هنه احنا هنطبع 
+print("The total area is :"+str_area)
+
+print("Give the gyu: $"+ str_total_price)
