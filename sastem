@@ -1,0 +1,256 @@
+from flask import Flask, render_template_string, request, redirect, url_for, jsonify, flash
+from flask_sqlalchemy import SQLAlchemy
+from datetime import datetime, date
+import os
+import decimal
+
+app = Flask(__name__)
+app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///data.db'
+app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+app.config['SECRET_KEY'] = 'replace-this-with-a-secure-key'
+
+db = SQLAlchemy(app)
+
+# --------- Models ---------
+class Product(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    barcode = db.Column(db.String(64), unique=True, nullable=True)
+    name = db.Column(db.String(200), nullable=False)
+    price = db.Column(db.Numeric(10, 2), nullable=False)
+    cost = db.Column(db.Numeric(10, 2), nullable=True)
+    quantity = db.Column(db.Numeric(10, 3), nullable=False, default=0)
+    unit = db.Column(db.String(20), default='pcs')
+    expiry = db.Column(db.Date, nullable=True)
+
+class Sale(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    timestamp = db.Column(db.DateTime, default=datetime.utcnow)
+    total = db.Column(db.Numeric(12, 2), nullable=False)
+    items = db.relationship('SaleItem', backref='sale', cascade='all, delete-orphan')
+
+class SaleItem(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    sale_id = db.Column(db.Integer, db.ForeignKey('sale.id'), nullable=False)
+    product_id = db.Column(db.Integer, db.ForeignKey('product.id'), nullable=False)
+    product = db.relationship('Product')
+    qty = db.Column(db.Numeric(10, 3), nullable=False)
+    price = db.Column(db.Numeric(10, 2), nullable=False)
+
+# --------- Helpers ---------
+def init_db():
+    db.create_all()
+    if Product.query.count() == 0:
+        p1 = Product(barcode='6291041500213', name='أرز 1كجم', price=decimal.Decimal('40.00'), cost=decimal.Decimal('30.00'), quantity=50, unit='kg')
+        p2 = Product(barcode='6291041500214', name='حليب 1لتر', price=decimal.Decimal('25.00'), cost=decimal.Decimal('18.00'), quantity=100, unit='pcs')
+        p3 = Product(barcode='6291041500215', name='سكر 1كجم', price=decimal.Decimal('35.00'), cost=decimal.Decimal('25.00'), quantity=40, unit='kg')
+        db.session.add_all([p1, p2, p3])
+        db.session.commit()
+
+# --------- HTML Templates with Improved CSS ---------
+HOME_HTML = """
+<!DOCTYPE html>
+<html dir="rtl" lang="ar">
+<head>
+    <meta charset="UTF-8">
+    <title>نقطة بيع - سوبر ماركت</title>
+    <style>
+        body { font-family: 'Arial', sans-serif; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: #333; margin: 0; padding: 20px; direction: rtl; }
+        h1, h2 { color: #fff; text-align: center; }
+        input, button { padding: 10px; margin: 5px; border: none; border-radius: 5px; font-size: 16px; }
+        button { background: #4CAF50; color: white; cursor: pointer; }
+        button:hover { background: #45a049; }
+        table { width: 100%; border-collapse: collapse; margin: 20px 0; background: white; border-radius: 8px; overflow: hidden; }
+        th, td { padding: 12px; text-align: center; border-bottom: 1px solid #ddd; }
+        th { background: #f2f2f2; }
+        #total { font-weight: bold; color: #ff5722; }
+        .exit-btn { background: #f44336; position: fixed; top: 10px; right: 10px; }
+        .exit-btn:hover { background: #d32f2f; }
+    </style>
+</head>
+<body>
+    <button class="exit-btn" onclick="if(confirm('هل تريد الخروج؟')) window.close();">خروج</button>
+    <h1>نقطة بيع - سوبر ماركت (فرع واحد)</h1>
+    <h2>إضافة للفاتورة (مسح أو إدخال باركود/اسم)</h2>
+    <input type="text" id="lookup" placeholder="باركود أو اسم المنتج" onkeypress="if(event.key === 'Enter') lookupProduct();">
+    <button onclick="lookupProduct()">إضافة</button>
+    <div id="product-info" style="color: red;"></div>
+    <h2>السلة</h2>
+    <table>
+        <thead><tr><th>المنتج</th><th>الكمية</th><th>السعر</th><th>المجموع</th><th>الإجراء</th></tr></thead>
+        <tbody id="cart-table"></tbody>
+    </table>
+    <p>الإجمالي: <span id="total">0.00</span> ريال</p>
+    <button onclick="completeSale()">إنهاء البيع</button>
+    <button onclick="printReceipt()">طباعة الإيصال</button>
+    <p><a href="/admin">إدارة المنتجات والمخزون</a> | <a href="/reports">تقارير المبيعات</a></p>
+    <script>
+        let cart = [];
+        let lastSaleId = null;
+        function lookupProduct() {
+            const q = document.getElementById('lookup').value.trim();
+            if (!q) return;
+            fetch('/api/product/lookup?q=' + encodeURIComponent(q))
+                .then(r => r.json())
+                .then(data => {
+                    if (data.found) {
+                        addToCart(data.product);
+                        document.getElementById('lookup').value = '';
+                        document.getElementById('product-info').innerText = '';
+                    } else {
+                        document.getElementById('product-info').innerText = 'المنتج غير موجود';
+                    }
+                });
+        }
+        function addToCart(product) {
+            const qty = parseFloat(prompt('أدخل الكمية:', '1')) || 1;
+            if (qty <= 0) return;
+            const existing = cart.find(i => i.id === product.id);
+            if (existing) existing.qty += qty;
+            else cart.push({id: product.id, name: product.name, qty: qty, price: parseFloat(product.price)});
+            updateCart();
+        }
+        function updateCart() {
+            const table = document.getElementById('cart-table');
+            table.innerHTML = '';
+            let total = 0;
+            cart.forEach(item => {
+                const rowTotal = item.qty * item.price;
+                total += rowTotal;
+                table.innerHTML += `<tr><td>${item.name}</td><td>${item.qty}</td><td>${item.price.toFixed(2)}</td><td>${rowTotal.toFixed(2)}</td><td><button onclick="removeFromCart(${item.id})">إزالة</button></td></tr>`;
+            });
+            document.getElementById('total').innerText = total.toFixed(2);
+        }
+        function removeFromCart(id) {
+            cart = cart.filter(i => i.id !== id);
+            updateCart();
+        }
+        function completeSale() {
+            if (cart.length === 0) return alert('السلة فارغة');
+            const items = cart.map(i => ({product_id: i.id, qty: i.qty, price: i.price}));
+            fetch('/api/sale', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({items: items}) })
+                .then(r => r.json())
+                .then(data => {
+                    if (data.success) {
+                        alert('تم إنهاء البيع! رقم البيع: ' + data.sale_id);
+                        lastSaleId = data.sale_id;
+                        cart = [];
+                        updateCart();
+                    } else {
+                        alert('خطأ: ' + data.error);
+                    }
+                });
+        }
+        function printReceipt() {
+            if (lastSaleId) {
+                window.open('/receipt/' + lastSaleId, '_blank');
+            } else {
+                alert('لا يوجد إيصال لطباعته');
+            }
+        }
+    </script>
+</body>
+</html>
+"""
+
+ADMIN_HTML = """
+<!DOCTYPE html>
+<html dir="rtl" lang="ar">
+<head>
+    <meta charset="UTF-8">
+    <title>إدارة المنتجات</title>
+    <style>
+        body { font-family: 'Arial', sans-serif; background: #f4f4f4; margin: 20px; direction: rtl; }
+        h1, h2 { color: #333; }
+        form { background: white; padding: 20px; border-radius: 8px; margin-bottom: 20px; }
+        input { padding: 8px; margin: 5px; width: 200px; }
+        button { padding: 10px; background: #2196F3; color: white; border: none; border-radius: 5px; cursor: pointer; }
+        button:hover { background: #1976D2; }
+        table { width: 100%; border-collapse: collapse; background: white; }
+        th, td { padding: 10px; text-align: center; border: 1px solid #ddd; }
+        th { background: #eee; }
+        .flash { color: red; }
+    </style>
+</head>
+<body>
+    <h1>إدارة المنتجات</h1>
+    <a href="/">العودة لنقطة البيع</a>
+    {% with messages = get_flashed_messages() %}
+        {% if messages %}
+            <div class="flash">{{ messages[0] }}</div>
+        {% endif %}
+    {% endwith %}
+    <h2>إضافة منتج</h2>
+    <form method="POST" action="/admin/add">
+        باركود: <input name="barcode"><br>
+        الاسم: <input name="name" required><br>
+        السعر: <input name="price" type="number" step="0.01" required><br>
+        الكمية: <input name="qty" type="number" step="0.001" value="0"><br>
+        <button type="submit">إضافة</button>
+    </form>
+    <h2>المنتجات</h2>
+    <table>
+        <thead>
+            <tr><th>باركود</th><th>الاسم</th><th>السعر</th><th>الكمية</th><th>الإجراءات</th></tr>
+        </thead>
+        <tbody>
+            {% for product in products %}
+            <tr>
+                <td>{{ product.barcode or 'غير محدد' }}</td>
+                <td>{{ product.name }}</td>
+                <td>{{ product.price }}</td>
+                <td>{{ product.quantity }}</td>
+                <td>
+                    <a href="/admin/edit/{{ product.id }}">تعديل</a> | 
+                    <a href="/admin/stock/{{ product.id }}">إدارة المخزون</a> | 
+                    <a href="/admin/delete/{{ product.id }}" onclick="return confirm('هل أنت متأكد؟')">حذف</a>
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</body>
+</html>
+"""
+
+REPORTS_HTML = """
+<!DOCTYPE html>
+<html dir="rtl" lang="ar">
+<head>
+    <meta charset="UTF-8">
+    <title>تقارير المبيعات</title>
+    <style>
+        body { font-family: 'Arial', sans-serif; background: #f4f4f4; margin: 20px; direction: rtl; }
+        h1, h2 { color: #333; }
+        table { width: 100%; border-collapse: collapse; background: white; }
+        th, td { padding: 10px; text-align: center; border: 1px solid #ddd; }
+        th { background: #eee; }
+    </style>
+</head>
+<body>
+    <h1>تقارير المبيعات</h1>
+    <a href="/">العودة لنقطة البيع</a>
+    <h2>ملخص المبيعات اليومية</h2>
+    <p>إجمالي المبيعات اليوم: {{ daily_total }} ريال</p>
+    <h2>أفضل المنتجات مبيعًا</h2>
+    <table>
+        <thead>
+            <tr><th>المنتج</th><th>الكمية المباعة</th><th>الإيراد</th></tr>
+        </thead>
+        <tbody>
+            {% for item in top_products %}
+            <tr><td>{{ item.name }}</td><td>{{ item.total_qty }}</td><td>{{ item.total_revenue }}</td></tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</body>
+</html>
+"""
+
+RECEIPT_HTML = """
+<!DOCTYPE html>
+<html dir="rtl" lang="ar">
+<head>
+    <meta charset="UTF-8">
+    <title>إيصال البيع</title>
+    <style>
+        body { font-family: 'Courier New', monospace; margin: 20px; direction"""
