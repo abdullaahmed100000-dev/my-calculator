@@ -1,19 +1,65 @@
 
-#(Islamd Adventure)اسم العبه : مغامره الجزيره 
+#(Islamd Adventure Game)اسم العبه : مغامره الجزيره 
 #للمطوار :(عبد الله احمد )
 #الوصف :
-#يختار الاعب بابأ (احمر او ازرق ) ,وا\ا داخال الباب الصحيح يجد ثلاث صنديق (python) هزا  العبه عباره عن مغامره بسيطه بلغه
-#يجب ان يختار واحد منهم كي يجد الكنز 
-#الادوات المستخدم:ه)
-#1 (لغه python)
-#2 الشرواط المستخدمه(if.elif.else)
-#واجهة بسيطه (GUI)
+An interactive adventure game built with Python and Tkinter. Explore a mysterious island, choose doors and boxes, and find the treasure! Features fullscreen mode, sound effects, images, and scoring.
+
+### How to Play:
+- Run `game_improved.py` with Python.
+- Choose doors and boxes to win or lose.
+- Press Escape to exit fullscreen.
+
+### Requirements:
+- Python 3.x
+- Install: `pip install pygame pillow`
+
+## العربية
+لعبة مغامرة تفاعلية مبنية بـ Python و Tkinter. استكشف جزيرة غامضة، اختر أبواباً وصناديق، وابحث عن الكنز!
+
+### كيفية اللعب:
+- شغل `game_improved.py` بـ Python.
+- اختر الأبواب والصناديق للفوز أو الخسارة.
+- اضغط Escape للخروج من الشاشة الكاملة.
+
+### المتطلبات:
+- Python 3.x
+- تثبيت: `pip install pygame pillow`
+
+
+
 import tkinter as tk
-from tkinter import messagebox
+import pygame  # للصوت (تثبيت بـ pip install pygame)
+from PIL import Image, ImageTk  # للصور (تثبيت بـ pip install pillow إذا لزم الأمر)
+
+# تهيئة pygame للصوت
+pygame.mixer.init()
+
+# متغيرات عامة
+current_frame = None
+attempts = 0  # عداد المحاولات
+score = 0     # عداد النقاط
+
+# دالة لتحميل صورة خلفية (استخدم روابط أو ملفات محلية)
+def load_background(image_path):
+    try:
+        img = Image.open(image_path)
+        img = img.resize((root.winfo_screenwidth(), root.winfo_screenheight()), Image.Resampling.LANCZOS)
+        return ImageTk.PhotoImage(img)
+    except:
+        return None  # إذا لم تجد الصورة، استخدم خلفية عادية
+
+# دالة لتشغيل صوت
+def play_sound(sound_file):
+    try:
+        pygame.mixer.music.load(sound_file)
+        pygame.mixer.music.play()
+    except:
+        pass  # إذا لم يعمل الصوت، تجاهله
 
 # دالة لإعادة اللعبة
 def restart_game():
-    global current_frame
+    global current_frame, attempts, score
+    attempts += 1
     if current_frame:
         current_frame.destroy()
     start_game()
@@ -22,58 +68,110 @@ def restart_game():
 def start_game():
     global current_frame
     current_frame = tk.Frame(root)
-    current_frame.pack(pady=20)
+    current_frame.pack(fill="both", expand=True)
     
-    tk.Label(current_frame, text="☠️ Welcome to my Island! ☠️🏝️", font=("Arial", 16)).pack(pady=10)
-    tk.Label(current_frame, text="There are two doors in front of you: 🚪 Red Door and 🚪 Blue Door!", font=("Arial", 12)).pack(pady=10)
+    # إضافة خلفية (استبدل برابط صورة جزيرة مجانية أو ملف محلي)
+    bg_img = load_background("https://example.com/island.jpg")  # غير هذا برابط حقيقي أو ملف مثل "island.png"
+    if bg_img:
+        bg_label = tk.Label(current_frame, image=bg_img)
+        bg_label.image = bg_img
+        bg_label.place(relwidth=1, relheight=1)
     
-    tk.Button(current_frame, text="Open Red Door", command=lambda: choose_door("red"), bg="red", fg="white", font=("Arial", 12)).pack(side=tk.LEFT, padx=10)
-    tk.Button(current_frame, text="Open Blue Door", command=lambda: choose_door("blue"), bg="blue", fg="white", font=("Arial", 12)).pack(side=tk.RIGHT, padx=10)
+    tk.Label(current_frame, text="☠️ مرحبا بك في جزيرتي! ☠️🏝️", font=("Arial", 20, "bold"), bg="lightblue").pack(pady=20)
+    tk.Label(current_frame, text="هناك بابين أمامك: 🚪 الباب الأحمر و 🚪 الباب الأزرق!", font=("Arial", 14), bg="lightblue").pack(pady=10)
+    tk.Label(current_frame, text=f"المحاولات: {attempts} | النقاط: {score}", font=("Arial", 12), bg="lightblue").pack(pady=5)
+    
+    # أزرار أكبر مع تأثير hover
+    red_btn = tk.Button(current_frame, text="افتح الباب الأحمر", command=lambda: choose_door("red"), bg="red", fg="white", font=("Arial", 14), width=15, height=2)
+    red_btn.pack(side=tk.LEFT, padx=20)
+    red_btn.bind("<Enter>", lambda e: red_btn.config(bg="darkred"))  # تأثير hover
+    red_btn.bind("<Leave>", lambda e: red_btn.config(bg="red"))
+    
+    blue_btn = tk.Button(current_frame, text="افتح الباب الأزرق", command=lambda: choose_door("blue"), bg="blue", fg="white", font=("Arial", 14), width=15, height=2)
+    blue_btn.pack(side=tk.RIGHT, padx=20)
+    blue_btn.bind("<Enter>", lambda e: blue_btn.config(bg="darkblue"))
+    blue_btn.bind("<Leave>", lambda e: blue_btn.config(bg="blue"))
 
 # دالة لاختيار الباب
 def choose_door(door_choice):
-    global current_frame
+    global current_frame, score
     current_frame.destroy()
     current_frame = tk.Frame(root)
-    current_frame.pack(pady=20)
+    current_frame.pack(fill="both", expand=True)
     
     if door_choice == "blue":
-        tk.Label(current_frame, text="🚪🐊🐊🐊 You chose the crocodile door! Game Over!", font=("Arial", 14), fg="red").pack(pady=10)
-        tk.Button(current_frame, text="Play Again", command=restart_game, bg="green", fg="white").pack(pady=10)
-    elif door_choice == "red":
-        tk.Label(current_frame, text="Great! You entered the room.", font=("Arial", 14)).pack(pady=10)
-        tk.Label(current_frame, text="You found three boxes: 🎁 White, 🎁 Black, 🎁 Green", font=("Arial", 12)).pack(pady=10)
+        # خلفية تمساحات
+        bg_img = load_background("https://example.com/crocodile.jpg")  # غير برابط أو ملف
+        if bg_img:
+            bg_label = tk.Label(current_frame, image=bg_img)
+            bg_label.image = bg_img
+            bg_label.place(relwidth=1, relheight=1)
         
-        tk.Button(current_frame, text="Open White Box", command=lambda: choose_box("white"), bg="white", fg="black", font=("Arial", 12)).pack(side=tk.LEFT, padx=5)
-        tk.Button(current_frame, text="Open Black Box", command=lambda: choose_box("black"), bg="black", fg="white", font=("Arial", 12)).pack(side=tk.LEFT, padx=5)
-        tk.Button(current_frame, text="Open Green Box", command=lambda: choose_box("green"), bg="green", fg="black", font=("Arial", 12)).pack(side=tk.LEFT, padx=5)
+        tk.Label(current_frame, text="🚪🐊🐊🐊 اخترت باب التمساحات! انتهت اللعبة!", font=("Arial", 16), fg="red", bg="black").pack(pady=20)
+        play_sound("lose.wav")  # صوت خسارة (أضف ملف صوتي محلي)
+        tk.Button(current_frame, text="العب مرة أخرى", command=restart_game, bg="green", fg="white", font=("Arial", 14)).pack(pady=10)
+        tk.Button(current_frame, text="خروج", command=root.quit, bg="gray", fg="white", font=("Arial", 14)).pack(pady=5)
+    elif door_choice == "red":
+        tk.Label(current_frame, text="رائع! دخلت الغرفة.", font=("Arial", 16), bg="lightgreen").pack(pady=20)
+        tk.Label(current_frame, text="وجدت ثلاث صناديق: 🎁 أبيض، 🎁 أسود، 🎁 أخضر", font=("Arial", 14), bg="lightgreen").pack(pady=10)
+        
+        # أزرار الصناديق
+        white_btn = tk.Button(current_frame, text="افتح الصندوق الأبيض", command=lambda: choose_box("white"), bg="white", fg="black", font=("Arial", 12), width=15)
+        white_btn.pack(side=tk.LEFT, padx=10)
+        black_btn = tk.Button(current_frame, text="افتح الصندوق الأسود", command=lambda: choose_box("black"), bg="black", fg="white", font=("Arial", 12), width=15)
+        black_btn.pack(side=tk.LEFT, padx=10)
+        green_btn = tk.Button(current_frame, text="افتح الصندوق الأخضر", command=lambda: choose_box("green"), bg="green", fg="black", font=("Arial", 12), width=15)
+        green_btn.pack(side=tk.LEFT, padx=10)
 
 # دالة لاختيار الصندوق
 def choose_box(box_choice):
-    global current_frame
+    global current_frame, score
     current_frame.destroy()
     current_frame = tk.Frame(root)
-    current_frame.pack(pady=20)
+    current_frame.pack(fill="both", expand=True)
     
     if box_choice == "white":
-        tk.Label(current_frame, text="Oops! You opened a box filled with snakes! 🐍🐍🐍 Game Over!", font=("Arial", 14), fg="red").pack(pady=10)
+        bg_img = load_background("https://example.com/snakes.jpg")  # خلفية ثعابين
+        if bg_img:
+            bg_label = tk.Label(current_frame, image=bg_img)
+            bg_label.image = bg_img
+            bg_label.place(relwidth=1, relheight=1)
+        tk.Label(current_frame, text="أوه! فتحت صندوق مليء بالثعابين! 🐍🐍🐍 انتهت اللعبة!", font=("Arial", 16), fg="red", bg="black").pack(pady=20)
+        play_sound("lose.wav")
     elif box_choice == "black":
-        tk.Label(current_frame, text="Oops! You opened a box filled with spiders! 🕷️🕷️🕷️ Game Over!", font=("Arial", 14), fg="red").pack(pady=10)
+        bg_img = load_background("https://example.com/spiders.jpg")  # خلفية عناكب
+        if bg_img:
+            bg_label = tk.Label(current_frame, image=bg_img)
+            bg_label.image = bg_img
+            bg_label.place(relwidth=1, relheight=1)
+        tk.Label(current_frame, text="أوه! فتحت صندوق مليء بالعناكب! 🕷️🕷️🕷️ انتهت اللعبة!", font=("Arial", 16), fg="red", bg="black").pack(pady=20)
+        play_sound("lose.wav")
     elif box_choice == "green":
-        tk.Label(current_frame, text="Congratulations! You found the treasure! 🏆🏆🏆 You Win!", font=("Arial", 14), fg="green").pack(pady=10)
+        bg_img = load_background("https://example.com/treasure.jpg")  # خلفية كنز
+        if bg_img:
+            bg_label = tk.Label(current_frame, image=bg_img)
+            bg_label.image = bg_img
+            bg_label.place(relwidth=1, relheight=1)
+        tk.Label(current_frame, text="مبروك! وجدت الكنز! 🏆🏆🏆 فزت!", font=("Arial", 16), fg="green", bg="gold").pack(pady=20)
+        score += 10  # زيادة النقاط
+        play_sound("win.wav")  # صوت فوز
     else:
-        tk.Label(current_frame, text="Invalid choice! 🤷‍♀️🤷‍♀️🤷‍♀️", font=("Arial", 14), fg="orange").pack(pady=10)
+        tk.Label(current_frame, text="اختيار غير صحيح! 🤷‍♀️🤷‍♀️🤷‍♀️", font=("Arial", 16), fg="orange").pack(pady=20)
     
-    tk.Button(current_frame, text="Play Again", command=restart_game, bg="green", fg="white").pack(pady=10)
+    tk.Button(current_frame, text="العب مرة أخرى", command=restart_game, bg="green", fg="white", font=("Arial", 14)).pack(pady=10)
+    tk.Button(current_frame, text="خروج", command=root.quit, bg="gray", fg="white", font=("Arial", 14)).pack(pady=5)
 
 # إنشاء النافذة الرئيسية
 root = tk.Tk()
-root.title("Island Adventure Game")
-root.geometry("500x300")
-current_frame = None
+root.title("لعبة المغامرة على الجزيرة")
+
+# الشاشة الكاملة (تعمل على أي شاشة كمبيوتر)
+root.attributes('-fullscreen', True)
+root.bind('<Escape>', lambda e: root.quit())  # خروج بـ Escape
 
 # بدء اللعبة
 start_game()
 
 # تشغيل الحلقة الرئيسية
 root.mainloop()
+
