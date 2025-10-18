@@ -1,0 +1,79 @@
+
+#(Islamd Adventure)اسم العبه : مغامره الجزيره 
+#للمطوار :(عبد الله احمد )
+#الوصف :
+#يختار الاعب بابأ (احمر او ازرق ) ,وا\ا داخال الباب الصحيح يجد ثلاث صنديق (python) هزا  العبه عباره عن مغامره بسيطه بلغه
+#يجب ان يختار واحد منهم كي يجد الكنز 
+#الادوات المستخدم:ه)
+#1 (لغه python)
+#2 الشرواط المستخدمه(if.elif.else)
+#واجهة بسيطه (GUI)
+import tkinter as tk
+from tkinter import messagebox
+
+# دالة لإعادة اللعبة
+def restart_game():
+    global current_frame
+    if current_frame:
+        current_frame.destroy()
+    start_game()
+
+# دالة لبدء اللعبة
+def start_game():
+    global current_frame
+    current_frame = tk.Frame(root)
+    current_frame.pack(pady=20)
+    
+    tk.Label(current_frame, text="☠️ Welcome to my Island! ☠️🏝️", font=("Arial", 16)).pack(pady=10)
+    tk.Label(current_frame, text="There are two doors in front of you: 🚪 Red Door and 🚪 Blue Door!", font=("Arial", 12)).pack(pady=10)
+    
+    tk.Button(current_frame, text="Open Red Door", command=lambda: choose_door("red"), bg="red", fg="white", font=("Arial", 12)).pack(side=tk.LEFT, padx=10)
+    tk.Button(current_frame, text="Open Blue Door", command=lambda: choose_door("blue"), bg="blue", fg="white", font=("Arial", 12)).pack(side=tk.RIGHT, padx=10)
+
+# دالة لاختيار الباب
+def choose_door(door_choice):
+    global current_frame
+    current_frame.destroy()
+    current_frame = tk.Frame(root)
+    current_frame.pack(pady=20)
+    
+    if door_choice == "blue":
+        tk.Label(current_frame, text="🚪🐊🐊🐊 You chose the crocodile door! Game Over!", font=("Arial", 14), fg="red").pack(pady=10)
+        tk.Button(current_frame, text="Play Again", command=restart_game, bg="green", fg="white").pack(pady=10)
+    elif door_choice == "red":
+        tk.Label(current_frame, text="Great! You entered the room.", font=("Arial", 14)).pack(pady=10)
+        tk.Label(current_frame, text="You found three boxes: 🎁 White, 🎁 Black, 🎁 Green", font=("Arial", 12)).pack(pady=10)
+        
+        tk.Button(current_frame, text="Open White Box", command=lambda: choose_box("white"), bg="white", fg="black", font=("Arial", 12)).pack(side=tk.LEFT, padx=5)
+        tk.Button(current_frame, text="Open Black Box", command=lambda: choose_box("black"), bg="black", fg="white", font=("Arial", 12)).pack(side=tk.LEFT, padx=5)
+        tk.Button(current_frame, text="Open Green Box", command=lambda: choose_box("green"), bg="green", fg="black", font=("Arial", 12)).pack(side=tk.LEFT, padx=5)
+
+# دالة لاختيار الصندوق
+def choose_box(box_choice):
+    global current_frame
+    current_frame.destroy()
+    current_frame = tk.Frame(root)
+    current_frame.pack(pady=20)
+    
+    if box_choice == "white":
+        tk.Label(current_frame, text="Oops! You opened a box filled with snakes! 🐍🐍🐍 Game Over!", font=("Arial", 14), fg="red").pack(pady=10)
+    elif box_choice == "black":
+        tk.Label(current_frame, text="Oops! You opened a box filled with spiders! 🕷️🕷️🕷️ Game Over!", font=("Arial", 14), fg="red").pack(pady=10)
+    elif box_choice == "green":
+        tk.Label(current_frame, text="Congratulations! You found the treasure! 🏆🏆🏆 You Win!", font=("Arial", 14), fg="green").pack(pady=10)
+    else:
+        tk.Label(current_frame, text="Invalid choice! 🤷‍♀️🤷‍♀️🤷‍♀️", font=("Arial", 14), fg="orange").pack(pady=10)
+    
+    tk.Button(current_frame, text="Play Again", command=restart_game, bg="green", fg="white").pack(pady=10)
+
+# إنشاء النافذة الرئيسية
+root = tk.Tk()
+root.title("Island Adventure Game")
+root.geometry("500x300")
+current_frame = None
+
+# بدء اللعبة
+start_game()
+
+# تشغيل الحلقة الرئيسية
+root.mainloop()
