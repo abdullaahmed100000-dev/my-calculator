@@ -1,12 +1,8 @@
 
-
 # pos_desktop.py
-import os
 import zipfile
-updates_folder = "updates"
-if not os.path.exists(updates_folder):
- os.makedirs(updates_folder)
 def check_for_updates():
+
     """
     يبحث عن تحديث في مجلد updates ويحدث الكود تلقائيًا بدون حذف البيانات.
     """
@@ -68,9 +64,9 @@ def monitor_printers(callback):
                 if default_printer != current_printer:
                     current_printer = default_printer
                     callback(current_printer)
-            time.sleep(5)  # فحص كل 5 ثواني
+            time.sleep(55)  # فحص كل 5 ثواني
         except Exception:
-            time.sleep(10)
+            time.sleep(12)
 def on_new_printer_detected(printer_name):
     """تنبيه بسيط لمرة واحدة فقط عند اكتشاف طابعة جديدة"""
     print(f"✅ تم اكتشاف طابعة جديدة: {printer_name}")
@@ -78,7 +74,7 @@ def print_invoice_auto(invoice_data):
     """
     invoice_data = {
         "invoice_id": 123,
-        "store_name": "نقطة بيع سوبر ماركت",
+        "store_name": " بيع سوبر ماركت",
         "products": [
             {"name": "بيبسي", "price": 15.5, "quantity": 2},
             {"name": "شيبسي", "price": 10, "quantity": 3}
@@ -135,6 +131,7 @@ thread = threading.Thread(target=monitor_printers, args=(on_new_printer_detected
 thread.start()
 # ---------------- Flask App & DB ----------------
 app = Flask(__name__)
+
 app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///data.db'
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 app.config['SECRET_KEY'] = 'replace-this-with-a-secure-key'
@@ -201,9 +198,10 @@ HOME_HTML = """
 </head>
 <body>
     <button class="exit-btn" onclick="fetch('/shutdown', {method:'POST'}).then(()=>{window.close();})">خروج</button>
-    <h1>ساستم  - لاداره الاعمال (فرع واحد)</h1>
-    <h2>إضافة للفاتورة (مسح أو إدخال باركود/اسم)</h2>
-    <input type="text" id="lookup" placeholder="باركود أو اسم المنتج" onkeypress="if(event.key === 'Enter') lookupProduct();">
+    
+    <h1>سستم  - لاداره الاعمال (فرع واحد)</h1>
+    <h2>إضافة للفاتورة (مسح أو إدخال رقم المنتج/اسم)</h2>
+    <input type="text" id="lookup" placeholder="رقم المنتج أو اسم المنتج" onkeypress="if(event.key === 'Enter') lookupProduct();">
     <button onclick="lookupProduct()">إضافة</button>
     <div id="product-info" style="color: red;"></div>
     <h2>السلة</h2>
@@ -211,7 +209,7 @@ HOME_HTML = """
         <thead><tr><th>المنتج</th><th>الكمية</th><th>السعر</th><th>المجموع</th><th>الإجراء</th></tr></thead>
         <tbody id="cart-table"></tbody>
     </table>
-    <p>الإجمالي: <span id="total">0.00</span>جنيه</p>
+    <p>الإجمالي: <span id="total">0.00</span> جنيه </p>
     <button onclick="completeSale()">إنهاء البيع</button>
     <button onclick="printReceipt()">طباعة الإيصال</button>
     <p><a href="/admin">إدارة المنتجات والمخزون</a> | <a href="/reports">تقارير المبيعات</a></p>
@@ -276,7 +274,7 @@ HOME_HTML = """
             if (lastSaleId) {
                 window.open('/receipt/' + lastSaleId, '_blank');
             } else {
-                alert('لا يوجد إيصال لطباعته');
+                alert('لا يوجد مطبعه');
             }
         }
     </script>
@@ -312,8 +310,8 @@ ADMIN_HTML = """
     {% endwith %}
     <h2>إضافة منتج</h2>
     <form method="POST" action="/admin/add">
-        باركود: <input name="barcode"><br>
-        الاسم: <input name="name" required><br>
+        راقم المنتج: <input name="barcode"><br>
+        الاسم المنتج: <input name="name" required><br>
         السعر: <input name="price" type="number" step="0.01" required><br>
         الكمية: <input name="qty" type="number" step="0.001" value="0"><br>
         <button type="submit">إضافة</button>
@@ -321,7 +319,7 @@ ADMIN_HTML = """
     <h2>المنتجات</h2>
     <table>
         <thead>
-            <tr><th>باركود</th><th>الاسم</th><th>السعر</th><th>الكمية</th><th>الإجراءات</th></tr>
+            <tr><th>راقم المنتج</th><th>اسم المنتج  </th><th>السعر</th><th>الكمية</th><th>الإجراءات</th></tr>
         </thead>
         <tbody>
             {% for product in products %}
@@ -360,7 +358,7 @@ REPORTS_HTML = """
     <h1>تقارير المبيعات</h1>
     <a href="/">العودة لنقطة البيع</a>
     <h2>ملخص المبيعات اليومية</h2>
-    <p>إجمالي المبيعات اليوم: {{ daily_total }} ريال</p>
+    <p>إجمالي المبيعات اليوم: {{ daily_total }} جنيه </p>
     <h2>أفضل المنتجات مبيعًا</h2>
     <table>
         <thead>
@@ -730,10 +728,6 @@ def restore_backup(data_file_path):
 
 # ---------------- Main runner ----------------
 if __name__ == '__main__':
-    check_for_updates()
-    init_db()
-    start_desktop_app()
-
     # ensure DB and sample data
     with app.app_context():
         init_db()
@@ -749,4 +743,3 @@ if __name__ == '__main__':
     except Exception as e:
         print("خطأ في تشغيل الواجهة الرسومية:", e)
         print("يمكنك تشغيل السيرفر يدوياً بفتح المتصفح على http://127.0.0.1:5000")
- 
