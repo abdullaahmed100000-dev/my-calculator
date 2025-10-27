@@ -1,0 +1,110 @@
+
+
+import tkinter as tk
+from tkinter import messagebox
+
+# القوائم
+library_books = []
+wishlist = []
+
+# دوال
+def add_to_library():
+    book = entry_library.get().strip()
+    if book:
+        library_books.append(book)
+        entry_library.delete(0, tk.END)
+        update_display()
+    else:
+        messagebox.showwarning("تنبيه", "اكتب اسم الكتاب أولاً!")
+
+def add_to_wishlist():
+    book = entry_wishlist.get().strip()
+    if book:
+        wishlist.append(book)
+        entry_wishlist.delete(0, tk.END)
+        update_display()
+    else:
+        messagebox.showwarning("تنبيه", "اكتب اسم الكتاب أولاً!")
+
+def acquire_book():
+    book = entry_acquire.get().strip()
+    if book in wishlist:
+        wishlist.remove(book)
+        library_books.append(book)
+        entry_acquire.delete(0, tk.END)
+        update_display()
+        messagebox.showinfo("تم", f"تم نقل {book} إلى مكتبتك ✅")
+    else:
+        messagebox.showerror("خطأ", "الكتاب غير موجود في قائمة الأمنيات!")
+
+def donate_book():
+    book = entry_donate.get().strip()
+    if book in library_books:
+        library_books.remove(book)
+        entry_donate.delete(0, tk.END)
+        update_display()
+        messagebox.showinfo("تم", f"تم التبرع بالكتاب: {book}")
+    else:
+        messagebox.showerror("خطأ", "الكتاب غير موجود في مكتبتك!")
+
+def update_display():
+    label_library_books.config(text="📚 مكتبتك:\n" + "\n".join(library_books))
+    label_wishlist.config(text="📝 قائمة الأمنيات:\n" + "\n".join(wishlist))
+
+# واجهة المستخدم
+root = tk.Tk()
+root.title("📖 My Library System")
+root.geometry("500x600")
+root.configure(bg="#f8f9fa")
+
+# العناوين
+tk.Label(root, text="أضف كتاب إلى مكتبتك:", bg="#f8f9fa", font=("Arial", 12, "bold")).pack()
+entry_library = tk.Entry(root, width=40)
+entry_library.pack(pady=5)
+
+tk.Button(root, text="إضافة", command=add_to_library).pack(pady=5)
+
+tk.Label(root, text="أضف كتاب إلى قائمة الأمنيات:", bg="#f8f9fa", font=("Arial", 12, "bold")).pack()
+entry_wishlist = tk.Entry(root, width=40)
+entry_wishlist.pack(pady=5)
+
+tk.Button(root, text="إضافة", command=add_to_wishlist).pack(pady=5)
+
+tk.Label(root, text="📘 احصل على كتاب من قائمة الأمنيات:", bg="#f8f9fa", font=("Arial", 12, "bold")).pack()
+entry_acquire = tk.Entry(root, width=40)
+
+entry_acquire.pack(pady=5)
+tk.Button(root, text="نقل الكتاب إلى المكتبة", command=acquire_book).pack(pady=5)
+
+tk.Label(root, text="📕 تبرع بكتاب من مكتبتك:", bg="#f8f9fa", font=("Arial", 12, "bold")).pack()
+entry_donate = tk.Entry(root, width=40)
+
+entry_donate.pack(pady=5)
+
+tk.Button(root, text="تبرع", command=donate_book).pack(pady=5)
+
+# عرض القوائم
+label_library_books = tk.Label(root, text="📚 مكتبتك:\n(فارغة)", bg="#f8f9fa", justify="left")
+label_library_books.pack(pady=10)
+
+label_wishlist = tk.Label(root, text="📝 قائمة الأمنيات:\n(فارغة)", bg="#f8f9fa", justify="left")
+label_wishlist.pack(pady=10)
+
+root.mainloop()
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
