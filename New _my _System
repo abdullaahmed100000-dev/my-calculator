@@ -1,0 +1,1669 @@
+# ===============================
+# الجزء الأول - Flask + قاعدة البيانات + النسخ الاحتياطي
+# ===============================
+
+import os
+import shutil
+import threading
+import time
+import sys
+import json
+from decimal import Decimal
+from datetime import datetime, date, timedelta
+from flask import Flask, render_template_string, request, redirect, url_for, jsonify, flash
+from flask_sqlalchemy import SQLAlchemy
+from sqlalchemy import extract
+from flask import Flask, render_template, request, redirect, url_for, jsonify, flash
+
+# Remove automatic update utilities as requested (not included)
+
+# ---------------- Flask app & DB ----------------
+app = Flask(__name__)
+app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///data.db'
+app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+app.config['SECRET_KEY'] = 'replace-this-with-a-secure-key'
+db = SQLAlchemy(app)
+
+# ---------------- Models ----------------
+class Product(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    barcode = db.Column(db.String(64), unique=True, nullable=True)
+    name = db.Column(db.String(200), nullable=False)
+    price = db.Column(db.Numeric(10, 2), nullable=False)
+    cost = db.Column(db.Numeric(10, 2), nullable=True)
+    quantity = db.Column(db.Numeric(10, 3), nullable=False, default=0)
+    unit = db.Column(db.String(20), default='pcs')
+    expiry = db.Column(db.Date, nullable=True)
+
+class Supplier(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    name = db.Column(db.String(200), nullable=False)
+    phone = db.Column(db.String(50))
+    address = db.Column(db.String(300))
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+class Sale(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    timestamp = db.Column(db.DateTime, default=datetime.utcnow)
+    total = db.Column(db.Numeric(12, 2), nullable=False)
+    items = db.relationship('SaleItem', backref='sale', cascade='all, delete-orphan')
+
+class SaleItem(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    sale_id = db.Column(db.Integer, db.ForeignKey('sale.id'), nullable=False)
+    product_id = db.Column(db.Integer, db.ForeignKey('product.id'), nullable=False)
+    product = db.relationship('Product')
+    qty = db.Column(db.Numeric(10, 3), nullable=False)
+    price = db.Column(db.Numeric(10, 2), nullable=False)
+
+class Expense(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    timestamp = db.Column(db.DateTime, default=datetime.utcnow)
+    amount = db.Column(db.Numeric(12,2), nullable=False)
+    description = db.Column(db.String(400), nullable=True)
+
+class TrashItem(db.Model):
+    """Store soft-deleted records so user can restore them within 7 days"""
+    id = db.Column(db.Integer, primary_key=True)
+    table_name = db.Column(db.String(100), nullable=False)
+    record_id = db.Column(db.String(100), nullable=True)
+    data = db.Column(db.Text, nullable=False)  # JSON of the record
+    deleted_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+# ---------------- Helpers ----------------
+
+def init_db():
+    db.create_all()
+    # add some sample products and suppliers if empty
+    if Product.query.count() == 0:
+        p1 = Product(barcode='6291041500213', name='أرز 1كجم', price=Decimal('40.00'), cost=Decimal('30.00'), quantity=Decimal('50'), unit='kg')
+        p2 = Product(barcode='6291041500214', name='حليب 1لتر', price=Decimal('25.00'), cost=Decimal('18.00'), quantity=Decimal('100'), unit='pcs')
+        p3 = Product(barcode='6291041500215', name='سكر 1كجم', price=Decimal('35.00'), cost=Decimal('25.00'), quantity=Decimal('40'), unit='kg')
+        db.session.add_all([p1, p2, p3])
+    if Supplier.query.count() == 0:
+        s1 = Supplier(name='مورد العام', phone='01000000000', address='الفرع الرئيسي')
+        db.session.add(s1)
+    db.session.commit()
+
+
+def decimal_to_str(d):
+    if d is None:
+        return "0"
+    return format(d, 'f')
+
+# ---------------- Backup utilities ----------------
+
+def create_backup(data_file_path):
+    """Create backup of data.db (and optionally other folders)"""
+    try:
+        if not os.path.exists(data_file_path):
+            raise FileNotFoundError("❌ لم يتم العثور على ملف البيانات.")
+        backup_dir = os.path.join(os.getcwd(), "backup")
+        os.makedirs(backup_dir, exist_ok=True)
+        file_name = os.path.basename(data_file_path)
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        backup_name = f"backup_{timestamp}_{file_name}"
+        backup_path = os.path.join(backup_dir, backup_name)
+        shutil.copy2(data_file_path, backup_path)
+        print(f"✅ تم إنشاء النسخة الاحتياطية بنجاح: {backup_name}")
+        return True, backup_name
+    except Exception as e:
+        return False, str(e)
+
+
+def restore_backup(data_file_path, chosen_backup=None):
+    """Restore latest or chosen backup"""
+    try:
+        backup_dir = os.path.join(os.getcwd(), "backup")
+        if not os.path.exists(backup_dir) or not os.listdir(backup_dir):
+            raise FileNotFoundError("⚠️ لا توجد نسخ احتياطية متاحة للاسترجاع.")
+        backups = sorted(os.listdir(backup_dir), reverse=True)
+        latest_backup = chosen_backup if chosen_backup else backups[0]
+        latest_backup_path = os.path.join(backup_dir, latest_backup)
+        shutil.copy2(latest_backup_path, data_file_path)
+        print(f"♻️ تم استرجاع البيانات من النسخة: {latest_backup}")
+        return True, latest_backup
+    except Exception as e:
+        return False, str(e)
+
+# schedule trash cleanup every day: delete items older than 7 days
+
+def cleanup_trash_thread():
+    while True:
+        try:
+            cutoff = datetime.utcnow() - timedelta(days=7)
+            old = TrashItem.query.filter(TrashItem.deleted_at < cutoff).all()
+            if old:
+                for t in old:
+                    db.session.delete(t)
+                db.session.commit()
+        except Exception:
+            db.session.rollback()
+        time.sleep(24 * 3600)  # run once per day
+
+# start cleanup thread after app context
+
+def start_cleanup_background():
+    t = threading.Thread(target=cleanup_trash_thread, daemon=True)
+    t.start()
+
+# ---------------- Printing / Invoice (PDF) ----------------
+try:
+    import win32print
+    import win32api
+except Exception:
+    win32print = None
+    win32api = None
+
+from reportlab.lib.pagesizes import A4
+from reportlab.pdfgen import canvas
+
+
+def print_invoice_auto(invoice_data):
+    file_name = f"invoice_{invoice_data['invoice_id']}.pdf"
+    pdf_path = os.path.join(os.getcwd(), file_name)
+    c = canvas.Canvas(pdf_path, pagesize=A4)
+    width, height = A4
+    c.setFont("Helvetica-Bold", 18)
+    c.drawCentredString(width / 2, height - 50, invoice_data.get("store_name", "المتجر"))
+    c.setFont("Helvetica", 12)
+    c.drawString(40, height - 80, f"رقم الفاتورة: {invoice_data['invoice_id']}")
+    c.drawString(400, height - 80, f"التاريخ: {datetime.now().strftime('%Y-%m-%d %H:%M')}")
+    y = height - 120
+    c.setFont("Helvetica-Bold", 12)
+    c.drawString(50, y, "المنتج")
+    c.drawString(250, y, "السعر")
+    c.drawString(350, y, "الكمية")
+    c.drawString(450, y, "الإجمالي")
+    c.setFont("Helvetica", 11)
+    y -= 20
+    for item in invoice_data["products"]:
+        total_price = float(item["price"]) * float(item["quantity"])
+        c.drawString(50, y, item["name"])
+        c.drawString(250, y, f"{float(item['price']):.2f}")
+        c.drawString(350, y, str(item["quantity"]))
+        c.drawString(450, y, f"{total_price:.2f}")
+        y -= 20
+    c.setFont("Helvetica-Bold", 13)
+    c.drawString(50, y - 20, f"الإجمالي الكلي: {float(invoice_data['total']):.2f} جنيه")
+    c.showPage()
+    c.save()
+    # Try print via default printer, otherwise open PDF
+    try:
+        if win32print and win32api:
+            printer_name = win32print.GetDefaultPrinter()
+            if printer_name:
+                win32api.ShellExecute(0, "print", pdf_path, None, ".", 0)
+            else:
+                raise Exception("لا توجد طابعة افتراضية")
+        else:
+            raise Exception("وحدة win32 للطباعة غير متاحة")
+    except Exception:
+        # If printing fails just open file
+        try:
+            os.startfile(pdf_path)
+        except Exception:
+            pass
+
+
+# الجزء الثاني - سلة المحذوفات + المصروفات + الواجهة
+# ===============================
+
+# ---------------- Templates (HTML) ----------------
+HOME_HTML = """
+<!doctype html>
+<html lang="ar" dir="rtl">
+<head>
+  <meta charset="utf-8">
+  <title>💼 نظام نقطة البيع</title>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+  <style>
+    body {
+      background: #f8f9fa;
+      font-family: 'Tahoma', sans-serif;
+      direction: rtl;
+    }
+    header {
+      background-color: #007bff;
+      color: white;
+      padding: 15px;
+      border-radius: 0 0 15px 15px;
+      text-align: center;
+    }
+    nav a {
+      text-decoration: none;
+      color: white;
+      margin: 0 15px;
+      font-weight: bold;
+      transition: color 0.3s;
+    }
+    nav a:hover {
+      color: #ffc107;
+    }
+    .container {
+      margin-top: 40px;
+      text-align: center;
+    }
+    button, a.btn {
+      border-radius: 10px;
+      margin: 5px;
+      font-size: 16px;
+    }
+    footer {
+      margin-top: 60px;
+      text-align: center;
+      color: #555;
+      font-size: 14px;
+    }
+  </style>
+</head>
+<body>
+
+  <header>
+    <h2>💼 نظام إدارة نقطة البيع</h2>
+    <nav>
+      <a href="/">🏠 الرئيسية</a> |
+      <a href="/admin">📦 إضافه المنتج الجديد</a> |
+      <a href="/suppliers">🚚 الموردين</a> |
+      <a href="/reports">📊 تقارير المبيعات</a> |
+      <a href="/trash">🗑️ سلة المحذوفات</a>
+      <a href="/sales_box" class="btn btn-outline-primary w-100 mb-2">🛒 خانة البيع</a>
+
+      
+    </nav>
+  </header>
+
+  <div class="container">
+    <div class="mb-4">
+      <form action="/backup/create" method="post" style="display:inline;">
+        <button type="submit" class="btn btn-success">💾 إنشاء نسخة احتياطية</button>
+      </form>
+
+      <form action="/backup/restore" method="post" style="display:inline;">
+        <button type="submit" class="btn btn-warning text-white">♻️ استرجاع النسخة الأخيرة</button>
+      </form>
+
+      <a href="/expenses_page" class="btn btn-danger">💸 المصروفات</a>
+    </div>
+
+    <hr>
+
+    <div id="content" class="mt-4">
+      <h4 class="text-primary fw-bold mb-3"نظام _ اداره المبيعات </h4>
+      <p>استخدم هذه الواجهة لإدارة المبيعات، وإضافة المنتجات، ومتابعة الأرباح والمصروفات بسهولة.</p>
+    </div>
+  </div>
+
+  <footer>
+    <p>© 2025 -  _تم التطوير بواسطة <strong> المهندس ( عبدالله احمد ابو الحكم)</strong></p>
+  </footer>
+
+</body>
+</html>
+"""
+
+REPORTS_HTML = """
+<!doctype html>
+<html lang="ar" dir="rtl">
+<head>
+  <meta charset="utf-8">
+  <title>📊 تقارير المبيعات</title>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+  <style>
+    body {
+      background: #f8f9fa;
+      font-family: 'Tahoma', sans-serif;
+      direction: rtl;
+      text-align: center;
+      padding: 30px;
+    }
+    h2 {
+      color: #007bff;
+      font-weight: bold;
+      margin-bottom: 20px;
+    }
+    nav a {
+      color: #007bff;
+      text-decoration: none;
+      margin: 0 10px;
+      font-weight: bold;
+    }
+    nav a:hover {
+      color: #0056b3;
+      text-decoration: underline;
+    }
+    table {
+      margin: 20px auto;
+      width: 80%;
+      background: white;
+      border-radius: 10px;
+      box-shadow: 0 0 10px rgba(0,0,0,0.1);
+    }
+    th {
+      background-color: #007bff;
+      color: white;
+    }
+    td, th {
+      padding: 10px;
+      border: 1px solid #ddd;
+    }
+    button {
+      margin: 5px;
+      border-radius: 10px;
+    }
+    footer {
+      margin-top: 50px;
+      color: #555;
+      font-size: 14px;
+    }
+  </style>
+</head>
+<body>
+
+  <h2>📊 تقارير المبيعات</h2>
+
+  <nav>
+    <a href="/">🏠 الرجوع للرئيسية</a> |
+    <a href="/trash">🗑️ سلة المحذوفات</a>
+  </nav>
+
+  <hr>
+
+  <div class="mb-4">
+    <h5 class="text-success">إجمالي اليوم: <strong>{{ daily_total }}</strong> جنيه</h5>
+
+    <form action="/reports/daily" method="get" style="display:inline;">
+      <button type="submit" class="btn btn-primary">📅 عرض مبيعات اليوم</button>
+    </form>
+
+    <form action="/reports/monthly" method="get" style="display:inline;">
+      <button type="submit" class="btn btn-info text-white">📆 عرض مبيعات الشهر</button>
+    </form>
+
+    <form action="/reports/delete_today" method="post" style="display:inline;">
+      <button type="submit" class="btn btn-danger">🗑️ مسح مبيعات اليوم</button>
+    </form>
+
+    <form action="/reports/delete_month" method="post" style="display:inline;">
+      <button type="submit" class="btn btn-warning text-white">🗑️ مسح مبيعات الشهر</button>
+    </form>
+
+    <form action="/backup/create" method="post" style="display:inline;">
+      <button type="submit" class="btn btn-success">💾 نسخ احتياطي</button>
+    </form>
+
+    <form action="/backup/restore" method="post" style="display:inline;">
+      <button type="submit" class="btn btn-secondary">♻️ استرجاع</button>
+    </form>
+  </div>
+
+  <hr>
+
+  <h3 class="text-primary">🏆 أفضل المنتجات مبيعًا</h3>
+
+  <table class="table table-bordered table-striped">
+    <thead>
+      <tr>
+        <th>المنتج</th>
+        <th>الكمية المباعة</th>
+        <th>الإيراد</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for item in top_products %}
+      <tr>
+        <td>{{ item.name }}</td>
+        <td>{{ item.total_qty }}</td>
+        <td>{{ item.total_revenue }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+
+  <footer>
+    <p>© 2025 - تم التطوير بواسطة <strong>عبدالله أحمد </strong></p>
+  </footer>
+
+</body>
+</html>
+"""
+
+RECEIPT_HTML = """
+<!doctype html>
+<html lang="ar">
+<head>
+  <meta charset="utf-8">
+  <title>إيصال البيع</title>
+  <style>
+    body {
+      font-family: "Tahoma", sans-serif;
+      direction: rtl;
+      text-align: center;
+      background: #f9f9f9;
+      margin: 20px;
+    }
+    h2 {
+      color: #333;
+      margin-bottom: 10px;
+    }
+    table {
+      margin: auto;
+      border-collapse: collapse;
+      width: 80%;
+      background: #fff;
+      box-shadow: 0 0 5px rgba(0,0,0,0.1);
+    }
+    th, td {
+      border: 1px solid #ccc;
+      padding: 8px;
+    }
+    th {
+      background-color: #f0f0f0;
+    }
+    hr {
+      width: 80%;
+      border: none;
+      border-top: 1px solid #aaa;
+      margin: 15px auto;
+    }
+    .footer {
+      margin-top: 15px;
+      font-size: 14px;
+      color: #666;
+    }
+  </style>
+</head>
+<body>
+
+  <h2>🧾 إيصال البيع</h2>
+  <p>رقم الإيصال: <strong>{{ sale.id }}</strong></p>
+  <p>التاريخ: <strong>{{ sale.timestamp }}</strong></p>
+
+  <table>
+    <tr>
+      <th>المنتج</th>
+      <th>الكمية</th>
+      <th>السعر</th>
+      <th>المجموع</th>
+    </tr>
+    {% for it in items %}
+    <tr>
+      <td>{{ it.product.name }}</td>
+      <td>{{ it.qty }}</td>
+      <td>{{ it.price }}</td>
+      <td>{{ (it.qty * it.price)|round(2) }}</td>
+    </tr>
+    {% endfor %}
+  </table>
+
+  <hr>
+  <h3>الإجمالي: {{ sale.total }} جنيه</h3>
+
+  <div class="footer">
+    <p>تم التطوير بواسطة <strong>عبدالله أحمد</strong> © 2025</p>
+  </div>
+
+</body>
+</html>
+"""
+
+ADMIN_HTML = """
+<!doctype html>
+<html lang="ar">
+<head>
+  <meta charset="utf-8">
+  <title>🛠️ إدارة المنتجات</title>
+  <style>
+    body {
+      font-family: "Tahoma", sans-serif;
+      direction: rtl;
+      background-color: #f8f9fa;
+      text-align: center;
+      margin: 20px;
+    }
+    h2 {
+      color: #2c3e50;
+      margin-bottom: 10px;
+    }
+    nav {
+      margin-bottom: 15px;
+    }
+    a {
+      text-decoration: none;
+      color: #007bff;
+      font-weight: bold;
+    }
+    a:hover {
+      text-decoration: underline;
+    }
+    form {
+      margin: 10px 0;
+    }
+    input {
+      margin: 5px;
+      padding: 5px 8px;
+      border-radius: 5px;
+      border: 1px solid #ccc;
+      width: 120px;
+    }
+    button {
+      background-color: #27ae60;
+      color: #fff;
+      border: none;
+      padding: 6px 12px;
+      border-radius: 5px;
+      cursor: pointer;
+      transition: 0.2s;
+    }
+    button:hover {
+      background-color: #2ecc71;
+    }
+    table {
+      width: 90%;
+      margin: 20px auto;
+      border-collapse: collapse;
+      background-color: #fff;
+      box-shadow: 0 0 10px rgba(0,0,0,0.1);
+    }
+    th, td {
+      border: 1px solid #ddd;
+      padding: 8px;
+    }
+    th {
+      background-color: #f2f2f2;
+    }
+    td form {
+      display: inline;
+    }
+    td button {
+      background-color: #e74c3c;
+      margin: 2px;
+    }
+    td button:hover {
+      background-color: #c0392b;
+    }
+    td a {
+      margin: 0 5px;
+    }
+    .flash {
+      background-color: #ffeeba;
+      border: 1px solid #f0ad4e;
+      padding: 8px;
+      width: 60%;
+      margin: 10px auto;
+      border-radius: 5px;
+      color: #856404;
+    }
+    footer {
+      margin-top: 25px;
+      color: #777;
+      font-size: 14px;
+    }
+  </style>
+</head>
+<body>
+
+  <h2>🛠️ إدارة المنتجات</h2>
+  <nav><a href="/">🏠 الرجوع إلى الصفحة الرئيسية</a></nav>
+
+  {% with messages = get_flashed_messages() %}
+    {% if messages %}
+      <div class="flash"><strong>{{ messages[0] }}</strong></div>
+    {% endif %}
+  {% endwith %}
+
+  <form action="/admin/add" method="post">
+    🧾 رقم المنتج: <input name="barcode" placeholder="اختياري">
+    🛍️ الاسم: <input name="name" required>
+    💵 السعر: <input name="price" type="number" step="0.01" required>
+    📦 الكمية: <input name="qty" type="number" min="0" required>
+    <button type="submit">➕ إضافة منتج</button>
+  </form>
+
+  <hr>
+
+  <table>
+    <tr>
+      <th>📄 راقم المنج</th>
+      <th>📦 الاسم</th>
+      <th>💰 السعر</th>
+      <th>🔢 الكمية</th>
+      <th>⚙️ الإجراءات</th>
+    </tr>
+    {% for product in products %}
+    <tr>
+      <td>{{ product.barcode or 'غير محدد' }}</td>
+      <td>{{ product.name }}</td>
+      <td>{{ product.price }}</td>
+      <td>{{ product.quantity }}</td>
+      <td>
+        <a href="/admin/edit/{{ product.id }}">✏️ تعديل</a> |
+        <a href="/admin/stock/{{ product.id }}">📈 إدارة المخزون</a> |
+        <form action="/admin/delete/{{ product.id }}" method="post" style="display:inline;">
+          <button type="submit" onclick="return confirm('هل أنت متأكد من حذف هذا المنتج؟');">🗑️ حذف</button>
+        </form>
+      </td>
+    </tr>
+    {% endfor %}
+  </table>
+
+  <footer>
+    تم التطوير بواسطة <strong>عبدالله أحمد</strong> © 2025
+  </footer>
+
+"""
+
+
+EXPENSES_HTML = """
+<!doctype html><html lang="ar"><head><meta charset="utf-8"><title>المصروفات</title></head><body>
+<h2>المصروفات</h2>
+<nav><a href="/">الرجوع</a></nav>
+<form id="add-expense" action="/expenses/add" method="post">
+  المبلغ: <input name="amount"> الوصف: <input name="description"> <button type="submit">إضافة مصروف</button>
+</form>
+<hr>
+<h3>آخر المصروفات</h3>
+<table border="1"><tr><th>التاريخ</th><th>المبلغ</th><th>الوصف</th><th>إجراء</th></tr>
+{% for e in expenses %}
+<tr>
+<td>{{ e.timestamp }}</td>
+<td>{{ e.amount }}</td>
+<td>{{ e.description }}</td>
+<td>
+  <form action="/expenses/delete/{{ e.id }}" method="post" style="display:inline;"><button type="submit">حذف</button></form>
+  <a href="/expenses/edit/{{ e.id }}">تعديل</a>
+</td>
+</tr>
+{% endfor %}
+</table>
+</body></html>
+"""
+
+TRASH_HTML = """
+<!doctype html>
+<html lang="ar">
+<head>
+  <meta charset="utf-8">
+  <title>🗑️ سلة المحذوفات</title>
+  <style>
+    body {
+      font-family: "Tahoma", sans-serif;
+      direction: rtl;
+      text-align: center;
+      background-color: #f8f9fa;
+      margin: 20px;
+    }
+    h2 {
+      color: #c0392b;
+      margin-bottom: 10px;
+    }
+    nav {
+      margin-bottom: 15px;
+    }
+    a {
+      text-decoration: none;
+      color: #007bff;
+      font-weight: bold;
+    }
+    a:hover {
+      text-decoration: underline;
+    }
+    table {
+      margin: auto;
+      border-collapse: collapse;
+      width: 90%;
+      background-color: #fff;
+      box-shadow: 0 0 10px rgba(0,0,0,0.1);
+    }
+    th, td {
+      border: 1px solid #ddd;
+      padding: 8px;
+    }
+    th {
+      background-color: #f2f2f2;
+    }
+    pre {
+      text-align: left;
+      direction: ltr;
+      white-space: pre-wrap;
+      word-wrap: break-word;
+      font-size: 13px;
+      background: #f7f7f7;
+      padding: 5px;
+      border-radius: 5px;
+    }
+    button {
+      padding: 5px 10px;
+      margin: 2px;
+      border: none;
+      border-radius: 4px;
+      cursor: pointer;
+      color: #fff;
+      transition: 0.2s;
+    }
+    button[type="submit"]:first-of-type {
+      background-color: #27ae60;
+    }
+    button[type="submit"]:first-of-type:hover {
+      background-color: #2ecc71;
+    }
+    button[type="submit"]:last-of-type {
+      background-color: #e74c3c;
+    }
+    button[type="submit"]:last-of-type:hover {
+      background-color: #c0392b;
+    }
+    .footer {
+      margin-top: 25px;
+      color: #777;
+      font-size: 14px;
+    }
+  </style>
+</head>
+<body>
+
+  <h2>🗑️ سلة المحذوفات</h2>
+  <nav><a href="/">🏠 الرجوع إلى الصفحة الرئيسية</a></nav>
+
+  <table>
+    <tr>
+      <th>📂 الجدول</th>
+      <th>🔢 المعرّف</th>
+      <th>📄 البيانات</th>
+      <th>🕒 المحذوف في</th>
+      <th>⚙️ الإجراءات</th>
+    </tr>
+    {% for t in items %}
+    <tr>
+      <td>{{ t.table_name }}</td>
+      <td>{{ t.record_id }}</td>
+      <td><pre>{{ t.data }}</pre></td>
+      <td>{{ t.deleted_at }}</td>
+      <td>
+        <form action="/trash/restore/{{ t.id }}" method="post" style="display:inline;">
+          <button type="submit">♻️ استرجاع</button>
+        </form>
+        <form action="/trash/delete/{{ t.id }}" method="post" style="display:inline;">
+          <button type="submit" onclick="return confirm('هل أنت متأكد من الحذف النهائي؟');">🗑️ حذف نهائي</button>
+        </form>
+      </td>
+    </tr>
+    {% endfor %}
+  </table>
+
+  <div class="footer">
+    <p>تم التطوير بواسطة <strong>عبدالله أحمد</strong> © 2025</p>
+  </div>
+
+</body>
+</html>
+"""
+
+SUPPLIERS_HTML = """
+<!doctype html>
+<html lang="ar">
+<head>
+  <meta charset="utf-8">
+  <title>إدارة الموردين</title>
+  <style>
+    body {
+      font-family: "Tahoma", sans-serif;
+      direction: rtl;
+      text-align: center;
+      background-color: #f9f9f9;
+      margin: 20px;
+    }
+    h2 {
+      color: #333;
+      margin-bottom: 10px;
+    }
+    nav {
+      margin-bottom: 15px;
+    }
+    form {
+      margin: 10px 0;
+    }
+    input {
+      padding: 5px;
+      margin: 3px;
+      border: 1px solid #ccc;
+      border-radius: 4px;
+    }
+    button {
+      background-color: #4CAF50;
+      color: white;
+      border: none;
+      padding: 6px 12px;
+      border-radius: 5px;
+      cursor: pointer;
+    }
+    button:hover {
+      background-color: #45a049;
+    }
+    table {
+      margin: auto;
+      border-collapse: collapse;
+      width: 85%;
+      background: #fff;
+      box-shadow: 0 0 5px rgba(0,0,0,0.1);
+    }
+    th, td {
+      border: 1px solid #ccc;
+      padding: 8px;
+    }
+    th {
+      background-color: #f0f0f0;
+    }
+    a {
+      text-decoration: none;
+      color: #0066cc;
+    }
+    a:hover {
+      text-decoration: underline;
+    }
+    .footer {
+      margin-top: 20px;
+      font-size: 14px;
+      color: #666;
+    }
+  </style>
+</head>
+<body>
+
+  <h2>📦 إدارة الموردين</h2>
+  <nav><a href="/">🏠 الرجوع للصفحة الرئيسية</a></nav>
+
+  <form action="/suppliers/add" method="post">
+    الاسم: <input name="name" required>
+    الهاتف: <input name="phone">
+    العنوان: <input name="address">
+    <button type="submit">➕ إضافة مورد</button>
+  </form>
+
+  <hr>
+
+  <table>
+    <tr><th>الاسم</th><th>الهاتف</th><th>العنوان</th><th>الإجراءات</th></tr>
+    {% for s in suppliers %}
+    <tr>
+      <td>{{ s.name }}</td>
+      <td>{{ s.phone }}</td>
+      <td>{{ s.address }}</td>
+      <td>
+        <a href="/suppliers/edit/{{ s.id }}">✏️ تعديل</a> |
+        <form action="/suppliers/delete/{{ s.id }}" method="post" style="display:inline;">
+          <button type="submit" onclick="return confirm('هل أنت متأكد من حذف هذا المورد؟');">🗑️ حذف</button>
+        </form>
+      </td>
+    </tr>
+    {% endfor %}
+  </table>
+
+  <div class="footer">
+    <p>تم التطوير بواسطة <strong>عبدالله أحمد</strong> © 2025</p>
+  </div>
+
+</body>
+</html>
+"""
+""
+
+
+# ---------------- Routes (UI pages) ----------------
+@app.route('/')
+def home():
+    return render_template_string(HOME_HTML)
+
+@app.route('/admin')
+def admin():
+    products = Product.query.order_by(Product.id.desc()).all()
+    for p in products:
+        p.price = decimal_to_str(p.price)
+        p.quantity = decimal_to_str(p.quantity)
+    return render_template_string(ADMIN_HTML, products=products)
+
+@app.route('/suppliers')
+def suppliers_page():
+    suppliers = Supplier.query.order_by(Supplier.id.desc()).all()
+    return render_template_string(SUPPLIERS_HTML, suppliers=suppliers)
+
+@app.route('/trash')
+def trash_page():
+    items = TrashItem.query.order_by(TrashItem.deleted_at.desc()).all()
+    return render_template_string(TRASH_HTML, items=items)
+
+@app.route('/expenses_page')
+def expenses_page_ui():
+    exps = Expense.query.order_by(Expense.timestamp.desc()).limit(100).all()
+    arr = [{'id': e.id, 'timestamp': e.timestamp.strftime("%Y-%m-%d %H:%M:%S"), 'amount': decimal_to_str(e.amount), 'description': e.description} for e in exps]
+    return render_template_string(EXPENSES_HTML, expenses=arr)
+
+# ===============================
+# الجزء الثالث - المنتجات + الموردين + المبيعات اليومية والشهرية
+# ===============================
+
+# ---------------- API + Actions ----------------
+@app.route('/admin/add', methods=['POST'])
+def admin_add():
+    barcode = request.form.get('barcode') or None
+    name = request.form.get('name')
+    price = request.form.get('price') or '0'
+    qty = request.form.get('qty') or '0'
+    try:
+        p = Product(barcode=barcode, name=name, price=Decimal(price), quantity=Decimal(qty))
+        db.session.add(p)
+        db.session.commit()
+        flash('تمت إضافة المنتج')
+    except Exception as e:
+        db.session.rollback()
+        flash('خطأ في الإضافة: ' + str(e))
+    return redirect(url_for('admin'))
+
+@app.route('/admin/delete/<int:pid>', methods=['POST'])
+def admin_delete(pid):
+    p = Product.query.get_or_404(pid)
+    try:
+        # move to trash
+        data = {
+            'barcode': p.barcode,
+            'name': p.name,
+            'price': decimal_to_str(p.price),
+            'quantity': decimal_to_str(p.quantity),
+            'unit': p.unit
+        }
+        t = TrashItem(table_name='product', record_id=str(p.id), data=json.dumps(data, ensure_ascii=False))
+        db.session.add(t)
+        db.session.delete(p)
+        db.session.commit()
+        flash('تم نقل المنتج إلى سلة المحذوفات')
+    except Exception as e:
+        db.session.rollback()
+        flash('خطأ: ' + str(e))
+    return redirect(url_for('admin'))
+
+@app.route('/admin/edit/<int:pid>', methods=['GET', 'POST'])
+def admin_edit(pid):
+    product = Product.query.get(pid)
+    if not product:
+        flash('⚠️ المنتج غير موجود')
+        return redirect(url_for('admin'))
+
+    if request.method == 'POST':
+        try:
+            product.barcode = request.form.get('barcode') or None
+            product.name = request.form.get('name') or ''
+            product.price = Decimal(request.form.get('price') or '0')
+            product.quantity = Decimal(request.form.get('quantity') or '0')
+            product.unit = request.form.get('unit') or product.unit
+            db.session.commit()
+            flash('✅ تم تعديل المنتج بنجاح')
+            return redirect(url_for('admin'))
+        except Exception as e:
+            db.session.rollback()
+            flash('❌ خطأ أثناء التعديل: ' + str(e))
+            return redirect(url_for('admin_edit', pid=pid))
+    html = f"""
+    <!doctype html><html lang="ar"><head><meta charset="utf-8"><title>تعديل المنتج</title></head><body>
+    <h2>تعديل المنتج</h2>
+    <form method="post">
+    باركود: <input name="barcode" value="{product.barcode or ''}"><br>
+    الاسم: <input name="name" value="{product.name}"><br>
+    السعر: <input name="price" value="{decimal_to_str(product.price)}"><br>
+    الكمية: <input name="quantity" value="{decimal_to_str(product.quantity)}"><br>
+    الوحدة: <input name="unit" value="{product.unit}"><br>
+    <button type="submit">حفظ التعديلات</button>
+    </form>
+    </body></html>
+    
+    """
+    return html
+
+@app.route('/admin/stock/<int:pid>', methods=['GET', 'POST'])
+def admin_stock(pid):
+    product = Product.query.get(pid)
+    if not product:
+        flash('⚠️ المنتج غير موجود')
+        return redirect(url_for('admin'))
+    if request.method == 'POST':
+        action = request.form.get('action')
+        amount = Decimal(request.form.get('amount') or '0')
+        try:
+            if action == 'add':
+                product.quantity += amount
+            elif action == 'remove':
+                product.quantity = max(Decimal('0'), product.quantity - amount)
+            elif action == 'set':
+                product.quantity = amount
+            db.session.commit()
+            flash('✅ تم تحديث الكمية')
+        except Exception as e:
+            db.session.rollback()
+            flash('❌ خطأ أثناء تحديث الكمية: ' + str(e))
+        return redirect(url_for('admin'))
+    html = f"""
+    <!doctype html><html lang="ar"><head><meta charset="utf-8"><title>إدارة المخزون</title></head><body>
+    <h2>إدارة مخزون: {product.name}</h2>
+    <form method="post">
+      الكمية الحالية: {decimal_to_str(product.quantity)}<br>
+      المبلغ: <input name="amount"><br>
+      <button name="action" value="add">➕ زيادة</button>
+      <button name="action" value="remove">➖ إنقاص</button>
+      <button name="action" value="set">⚙️ تعيين كمية</button>
+    </form>
+    </body></html>
+    """
+    return html
+
+# API lookup
+@app.route('/api/product/lookup')
+def api_lookup():
+    q = request.args.get('q', '').strip()
+    if not q:
+        return jsonify({'found': False})
+    prod = Product.query.filter((Product.barcode == q) | (db.func.lower(Product.name).like(f"%{q.lower()}%"))).first()
+    if not prod:
+        return jsonify({'found': False})
+    res = {
+        'id': prod.id,
+        'barcode': prod.barcode,
+        'name': prod.name,
+        'price': decimal_to_str(prod.price),
+        'quantity': decimal_to_str(prod.quantity),
+        'unit': prod.unit
+    }
+    return jsonify({'found': True, 'product': res})
+
+# API to create sale
+@app.route('/api/sale', methods=['POST'])
+def api_sale():
+    data = request.get_json() or {}
+    items = data.get('items', [])
+    if not items:
+        return jsonify({'success': False, 'error': 'السلة فارغة'})
+    total = Decimal('0.00')
+    sale = Sale(total=Decimal('0.00'))
+    db.session.add(sale)
+    try:
+        for it in items:
+            pid = int(it.get('product_id'))
+            qty = Decimal(str(it.get('qty')))
+            price = Decimal(str(it.get('price')))
+            prod = Product.query.get(pid)
+            if not prod:
+                raise Exception(f'المنتج {pid} غير موجود')
+            if prod.quantity is not None and qty > prod.quantity:
+                raise Exception(f'كمية غير كافية في المخزون للمنتج {prod.name}')
+            prod.quantity = prod.quantity - qty
+            si = SaleItem(sale=sale, product=prod, qty=qty, price=price)
+            db.session.add(si)
+            total += (qty * price)
+        sale.total = total
+        db.session.commit()
+        return jsonify({'success': True, 'sale_id': sale.id})
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({'success': False, 'error': str(e)})
+
+@app.route('/receipt/<int:sale_id>')
+def receipt(sale_id):
+    sale = Sale.query.get_or_404(sale_id)
+    items = sale.items
+    for it in items:
+        it.price = float(it.price)
+        it.qty = float(it.qty)
+    return render_template_string(RECEIPT_HTML, sale=sale, items=items)
+
+# Reports and endpoints
+@app.route('/reports')
+def reports():
+    today = date.today()
+    sales_today = Sale.query.filter(db.func.date(Sale.timestamp) == today).all()
+    daily_total = sum([s.total for s in sales_today]) or Decimal('0.00')
+    q = db.session.query(
+        Product.name,
+        db.func.sum(SaleItem.qty).label('total_qty'),
+        db.func.sum(SaleItem.qty * SaleItem.price).label('total_revenue')
+    ).join(SaleItem, Product.id == SaleItem.product_id).group_by(Product.id).order_by(db.desc('total_qty')).limit(10)
+    top_products = []
+    for row in q:
+        top_products.append({
+            'name': row[0],
+            'total_qty': decimal_to_str(row[1] or Decimal('0')),
+            'total_revenue': decimal_to_str(row[2] or Decimal('0.00'))
+        })
+    return render_template_string(REPORTS_HTML, daily_total=decimal_to_str(daily_total), top_products=top_products)
+
+@app.route('/reports/daily')
+def reports_daily():
+    today = date.today()
+    sales_today = Sale.query.filter(db.func.date(Sale.timestamp) == today).order_by(Sale.timestamp.desc()).all()
+    # return simple list
+    out = []
+    for s in sales_today:
+        out.append({'id': s.id, 'timestamp': s.timestamp.strftime("%Y-%m-%d %H:%M:%S"), 'total': decimal_to_str(s.total)})
+    return jsonify({'sales': out})
+
+@app.route('/reports/monthly')
+def reports_monthly():
+    today = date.today()
+    month = today.month
+    year = today.year
+    sales_month = Sale.query.filter(extract('month', Sale.timestamp) == month, extract('year', Sale.timestamp) == year).order_by(Sale.timestamp.desc()).all()
+    out = []
+    for s in sales_month:
+        out.append({'id': s.id, 'timestamp': s.timestamp.strftime("%Y-%m-%d %H:%M:%S"), 'total': decimal_to_str(s.total)})
+    return jsonify({'sales': out})
+
+@app.route('/reports/delete_today', methods=['POST'])
+def delete_today_sales():
+    try:
+        today = date.today()
+        sales_today = Sale.query.filter(db.func.date(Sale.timestamp) == today).all()
+        ids = [s.id for s in sales_today]
+        if ids:
+            # move to trash before delete
+            for s in sales_today:
+                data = {'total': decimal_to_str(s.total), 'timestamp': s.timestamp.strftime("%Y-%m-%d %H:%M:%S")}
+                t = TrashItem(table_name='sale', record_id=str(s.id), data=json.dumps(data, ensure_ascii=False))
+                db.session.add(t)
+            SaleItem.query.filter(SaleItem.sale_id.in_(ids)).delete(synchronize_session=False)
+            Sale.query.filter(Sale.id.in_(ids)).delete(synchronize_session=False)
+            db.session.commit()
+        return jsonify({'success': True})
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({'success': False, 'error': str(e)})
+
+@app.route('/reports/delete_month', methods=['POST'])
+def delete_month_sales():
+    try:
+        today = date.today()
+        month = today.month
+        year = today.year
+        sales_month = Sale.query.filter(extract('month', Sale.timestamp) == month, extract('year', Sale.timestamp) == year).all()
+        ids = [s.id for s in sales_month]
+        if ids:
+            for s in sales_month:
+                data = {'total': decimal_to_str(s.total), 'timestamp': s.timestamp.strftime("%Y-%m-%d %H:%M:%S")}
+                t = TrashItem(table_name='sale', record_id=str(s.id), data=json.dumps(data, ensure_ascii=False))
+                db.session.add(t)
+            SaleItem.query.filter(SaleItem.sale_id.in_(ids)).delete(synchronize_session=False)
+            Sale.query.filter(Sale.id.in_(ids)).delete(synchronize_session=False)
+            db.session.commit()
+        return jsonify({'success': True})
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({'success': False, 'error': str(e)})
+
+# Expenses endpoints (add/edit/delete)
+@app.route('/expenses', methods=['GET'])
+def expenses_api():
+    exps = Expense.query.order_by(Expense.timestamp.desc()).limit(100).all()
+    arr = [{'id': e.id, 'timestamp': e.timestamp.strftime("%Y-%m-%d %H:%M:%S"), 'amount': decimal_to_str(e.amount), 'description': e.description} for e in exps]
+    return jsonify({'expenses': arr})
+
+@app.route('/expenses/add', methods=['POST'])
+def add_expense():
+    # support form submit and json
+    if request.is_json:
+        data = request.get_json() or {}
+        amount = data.get('amount', '0')
+        desc = data.get('description', '')
+    else:
+        amount = request.form.get('amount', '0')
+        desc = request.form.get('description', '')
+    try:
+        amount_d = Decimal(str(amount))
+        e = Expense(amount=amount_d, description=desc)
+        db.session.add(e)
+        db.session.commit()
+        return redirect(url_for('expenses_page_ui')) if not request.is_json else jsonify({'success': True})
+    except Exception as ex:
+        db.session.rollback()
+        return jsonify({'success': False, 'error': str(ex)})
+
+@app.route('/expenses/delete/<int:eid>', methods=['POST'])
+def delete_expense(eid):
+    e = Expense.query.get_or_404(eid)
+    try:
+        data = {'amount': decimal_to_str(e.amount), 'description': e.description}
+        t = TrashItem(table_name='expense', record_id=str(e.id), data=json.dumps(data, ensure_ascii=False))
+        db.session.add(t)
+        db.session.delete(e)
+        db.session.commit()
+        return redirect(url_for('expenses_page_ui'))
+    except Exception as ex:
+        db.session.rollback()
+        return jsonify({'success': False, 'error': str(ex)})
+
+@app.route('/expenses/edit/<int:eid>', methods=['GET', 'POST'])
+def edit_expense(eid):
+    e = Expense.query.get_or_404(eid)
+    if request.method == 'POST':
+        try:
+            e.amount = Decimal(str(request.form.get('amount') or '0'))
+            e.description = request.form.get('description') or ''
+            db.session.commit()
+            return redirect(url_for('expenses_page_ui'))
+        except Exception as ex:
+            db.session.rollback()
+            flash('خطأ: ' + str(ex))
+            return redirect(url_for('expenses_page_ui'))
+    # simple form
+    return f"""<!doctype html><html lang=\"ar\"><head><meta charset=\"utf-8\"><title>تعديل المصروف</title></head><body>
+    <h2>تعديل المصروف</h2>
+    <form method=\"post\">المبلغ: <input name=\"amount\" value=\"{decimal_to_str(e.amount)}\"> الوصف: <input name=\"description\" value=\"{e.description or ''}\"> <button type=\"submit\">حفظ</button></form>
+    </body></html>"""
+
+# Trash actions
+@app.route('/trash/restore/<int:tid>', methods=['POST'])
+def trash_restore(tid):
+    t = TrashItem.query.get_or_404(tid)
+    try:
+        data = json.loads(t.data)
+        if t.table_name == 'product':
+            p = Product(barcode=data.get('barcode'), name=data.get('name'), price=Decimal(str(data.get('price') or '0')), quantity=Decimal(str(data.get('quantity') or '0')))
+            db.session.add(p)
+        elif t.table_name == 'expense':
+            e = Expense(amount=Decimal(str(data.get('amount') or '0')), description=data.get('description'))
+            db.session.add(e)
+        elif t.table_name == 'sale':
+            # restoring sale is complex; for now keep the JSON as a log: create a Sale record with 0 items
+            s = Sale(total=Decimal(str(data.get('total') or '0')))
+            db.session.add(s)
+        db.session.delete(t)
+        db.session.commit()
+        return redirect(url_for('trash_page'))
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({'success': False, 'error': str(e)})
+
+@app.route('/trash/delete/<int:tid>', methods=['POST'])
+def trash_delete(tid):
+    t = TrashItem.query.get_or_404(tid)
+    try:
+        db.session.delete(t)
+        db.session.commit()
+        return redirect(url_for('trash_page'))
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({'success': False, 'error': str(e)})
+
+# Suppliers actions
+@app.route('/suppliers/add', methods=['POST'])
+def suppliers_add():
+    name = request.form.get('name')
+    phone = request.form.get('phone')
+    address = request.form.get('address')
+    try:
+        s = Supplier(name=name, phone=phone, address=address)
+        db.session.add(s)
+        db.session.commit()
+        return redirect(url_for('suppliers_page'))
+    except Exception as e:
+        db.session.rollback()
+        flash('خطأ: ' + str(e))
+        return redirect(url_for('suppliers_page'))
+
+@app.route('/suppliers/delete/<int:sid>', methods=['POST'])
+def suppliers_delete(sid):
+    s = Supplier.query.get_or_404(sid)
+    try:
+        data = {'name': s.name, 'phone': s.phone, 'address': s.address}
+        t = TrashItem(table_name='supplier', record_id=str(s.id), data=json.dumps(data, ensure_ascii=False))
+        db.session.add(t)
+        db.session.delete(s)
+        db.session.commit()
+        return redirect(url_for('suppliers_page'))
+    except Exception as e:
+        db.session.rollback()
+        flash('خطأ: ' + str(e))
+        return redirect(url_for('suppliers_page'))
+
+@app.route('/suppliers/edit/<int:sid>', methods=['GET', 'POST'])
+def suppliers_edit(sid):
+    s = Supplier.query.get_or_404(sid)
+    if request.method == 'POST':
+        s.name = request.form.get('name') or s.name
+        s.phone = request.form.get('phone') or s.phone
+        s.address = request.form.get('address') or s.address
+        db.session.commit()
+        return redirect(url_for('suppliers_page'))
+    return f"""<!doctype html><html lang=\"ar\"><head><meta charset=\"utf-8\"><title>تعديل مورد</title></head><body>
+    <h2>تعديل مورد</h2>
+    <form method=\"post\">الاسم: <input name=\"name\" value=\"{s.name}\"> الهاتف: <input name=\"phone\" value=\"{s.phone or ''}\"> العنوان: <input name=\"address\" value=\"{s.address or ''}\"> <button type=\"submit\">حفظ</button></form>
+    </body></html>"""
+
+# Backup routes
+@app.route('/backup/create', methods=['POST'])
+def backup_create_route():
+    data_file = os.path.join(os.getcwd(), "data.db")
+    ok, info = create_backup(data_file)
+    if ok:
+        flash('✅ تم إنشاء النسخة الاحتياطية: ' + info)
+        return redirect(url_for('home'))
+    else:
+        flash('❌ خطأ في النسخ الاحتياطي: ' + str(info))
+        return redirect(url_for('home'))
+
+@app.route('/backup/restore', methods=['POST'])
+def backup_restore_route():
+    data_file = os.path.join(os.getcwd(), "data.db")
+    ok, info = restore_backup(data_file)
+    if ok:
+        flash('♻️ تم استرجاع النسخة: ' + info)
+        return redirect(url_for('home'))
+    else:
+        flash('❌ خطأ في الاسترجاع: ' + str(info))
+        return redirect(url_for('home'))
+
+# shutdown for desktop close
+@app.route('/shutdown', methods=['POST'])
+def shutdown():
+    func = request.environ.get('werkzeug.server.shutdown')
+    if func:
+        func()
+
+    @app.route('/sales_box', methods=['GET', 'POST'])
+    def sales_box():
+        products = Product.query.all()  # عرض المنتجات للاختيار
+
+        if request.method == 'POST':
+            product_name = request.form.get('product_name')
+            quantity = request.form.get('quantity')
+
+            if not product_name or not quantity:
+                flash("⚠️ يجب إدخال اسم المنتج والكمية!", "warning")
+                return redirect(url_for('sales_box'))
+
+            try:
+                quantity = int(quantity)
+            except ValueError:
+                flash("❌ الكمية يجب أن تكون رقم صحيح!", "danger")
+                return redirect(url_for('sales_box'))
+
+            # البحث عن المنتج سواء بالاسم أو الكود
+            product = Product.query.filter(
+                (Product.name.ilike(f'%{product_name}%')) |
+                (Product.id.like(f'%{product_name}%'))
+            ).first()
+
+            if not product:
+                flash("❌ المنتج غير موجود في قاعدة البيانات!", "danger")
+                return redirect(url_for('sales_box'))
+
+            if product.quantity < quantity:
+                flash("⚠️ الكمية المطلوبة غير متوفرة في المخزون!", "warning")
+                return redirect(url_for('sales_box'))
+
+            # حساب الإجمالي
+            total_price = float(product.price) * quantity
+
+            # إنشاء البيع
+            new_sale = Sale(total=total_price)
+            db.session.add(new_sale)
+            db.session.commit()
+
+            # تسجيل تفاصيل البيع
+            sale_item = SaleItem(
+                sale_id=new_sale.id,
+                product_id=product.id,
+                qty=quantity,
+                price=product.price
+            )
+            db.session.add(sale_item)
+
+            # تقليل المخزون
+            product.quantity -= quantity
+            db.session.commit()
+
+            flash(f"✅ تمت إضافة البيع بنجاح ({product.name} × {quantity}) = {total_price} جنيه", "success")
+            return redirect(url_for('sales_box'))
+
+        # 🔥 هنا الحل:
+        # جلب كل المبيعات لإرسالها للصفحة
+        sales = SaleItem.query.order_by(SaleItem.id.desc()).all()
+
+        return render_template('sales_box.html', products=products, sales=sales)
+
+    return 'shutting down'
+@app.route('/sales_box', methods=['GET', 'POST'])
+def sales_box():
+    products = Product.query.all()  # عرض المنتجات للاختيار
+
+    if request.method == 'POST':
+        product_name = request.form.get('product_name')
+        quantity = request.form.get('quantity')
+
+        if not product_name or not quantity:
+            flash("⚠️ يجب إدخال اسم المنتج والكمية!", "warning")
+            return redirect(url_for('sales_box'))
+
+        try:
+            quantity = int(quantity)
+        except ValueError:
+            flash("❌ الكمية يجب أن تكون رقم صحيح!", "danger")
+            return redirect(url_for('sales_box'))
+
+        # ✅ البحث عن المنتج سواء بالاسم أو بالرقم (ID)
+        product = Product.query.filter(
+            (Product.name.ilike(f'%{product_name}%')) |
+            (Product.id.like(f'%{product_name}%'))
+        ).first()
+
+        if not product:
+            flash("❌ المنتج غير موجود في قاعدة البيانات!", "danger")
+            return redirect(url_for('sales_box'))
+
+        if product.quantity < quantity:
+            flash("⚠️ الكمية المطلوبة غير متوفرة في المخزون!", "warning")
+            return redirect(url_for('sales_box'))
+
+        # ✅ حساب الإجمالي
+        total_price = float(product.price) * quantity
+
+        # ✅ إنشاء عملية البيع الجديدة
+        new_sale = Sale(total=total_price)
+        db.session.add(new_sale)
+        db.session.commit()
+
+        # ✅ تسجيل تفاصيل البيع
+        sale_item = SaleItem(
+            sale_id=new_sale.id,
+            product_id=product.id,
+            qty=quantity,
+            price=product.price
+        )
+        db.session.add(sale_item)
+
+        # ✅ تقليل الكمية من المخزون
+        product.quantity -= quantity
+
+        db.session.commit()
+
+        flash(f"✅ تمت إضافة البيع بنجاح ({product.name} × {quantity}) = {total_price} جنيه", "success")
+        return redirect(url_for('sales_box'))
+
+    return render_template('sales_box.html', products=products)
+
+
+# ---------------- Desktop Launcher (PyQt) ----------------
+from PyQt5.QtWidgets import QMessageBox
+from PyQt5.QtWidgets import QApplication, QMainWindow, QVBoxLayout, QWidget, QPushButton, QHBoxLayout
+from PyQt5.QtWebEngineWidgets import QWebEngineView
+from PyQt5.QtCore import QUrl
+
+
+def start_desktop_app():
+    class POSWindow(QMainWindow):
+        def __init__(self):
+            super().__init__()
+            self.setWindowTitle("نقطة بيع - سوبر ماركت")
+            self.resize(1024, 768)
+            central = QWidget()
+            self.setCentralWidget(central)
+            v = QVBoxLayout()
+            topbar = QHBoxLayout()
+            exit_btn = QPushButton("خروج")
+            exit_btn.setFixedHeight(40)
+            exit_btn.clicked.connect(self.close_application)
+            topbar.addStretch()
+            topbar.addWidget(exit_btn)
+            v.addLayout(topbar)
+            self.browser = QWebEngineView()
+            self.browser.setUrl(QUrl("http://127.0.0.1:5000/"))
+            v.addWidget(self.browser)
+            central.setLayout(v)
+        def close_application(self):
+            try:
+                import requests
+                requests.post("http://127.0.0.1:5000/shutdown", timeout=1)
+            except Exception:
+                pass
+            QApplication.quit()
+    qt_app = QApplication(sys.argv)
+    win = POSWindow()
+    win.show()
+    qt_app.exec_()
+
+# ---------------- Main runner ----------------
+if __name__ == '__main__':
+    if __name__ == '__main__':
+        with app.app_context():
+            db.create_all()  # ✅ إنشاء جميع الجداول في قاعدة البيانات لو مش موجودة
+            init_db()  # إضافة البيانات التجريبية أو الإعدادات الأولية
+            start_cleanup_background()
+
+
+    def run_flask():
+        # run only on localhost and without reloader
+        app.run(host='127.0.0.1', port=5000, debug=False, use_reloader=False)
+    t = threading.Thread(target=run_flask, daemon=True)
+    t.start()
+    try:
+        start_desktop_app()
+    except Exception as e:
+        print("خطأ في تشغيل الواجهة الرسومية:", e)
+        print("يمكنك تشغيل السيرفر يدوياً بفتح المتصفح على http://127.0.0.1:5000")
+
+
+
+#الجزاء التحت يخص ملف HTML
+<!doctype html>
+<html lang="ar" dir="rtl">
+<head>
+  <meta charset="utf-8">
+  <title>🛒 خانة البيع</title>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+
+  <style>
+    body {
+      background: linear-gradient(135deg, #007BFF, #3399FF);
+      color: black;
+      font-family: 'Tahoma', sans-serif;
+      min-height: 100vh;
+      padding: 30px;
+    }
+
+    .card {
+      background: white;
+      border-radius: 20px;
+      box-shadow: 0 5px 20px rgba(0, 0, 0, 0.2);
+      padding: 25px;
+    }
+
+    .form-control {
+      border-radius: 10px;
+      border: 2px solid #007BFF;
+    }
+
+    .btn-custom {
+      background: linear-gradient(145deg, #FFD700, #FFC300);
+      color: black;
+      font-weight: bold;
+      border-radius: 12px;
+      box-shadow: 0 5px 0 #b38f00;
+    }
+
+    th {
+      background-color: #007BFF;
+      color: white;
+    }
+  </style>
+</head>
+
+<body>
+
+<div class="container">
+
+  <h2 class="text-center mb-4 fw-bold text-light">🛍️ نظام البيع</h2>
+
+  <!-- رسائل الفلاش -->
+  {% with messages = get_flashed_messages(with_categories=true) %}
+  {% if messages %}
+    <div class="mt-3">
+      {% for category, message in messages %}
+      <div class="alert alert-{{ category }} text-center fw-bold">
+        {{ message }}
+      </div>
+      {% endfor %}
+    </div>
+  {% endif %}
+  {% endwith %}
+
+  <div class="card mt-3">
+
+    <!-- نموذج البيع -->
+    <form method="POST" action="/sales_box" class="row g-3">
+
+      <div class="col-md-6">
+        <label class="form-label fw-bold">🔍 اسم المنتج أو الكود</label>
+        <input type="text" name="product_name" class="form-control" placeholder="أدخل اسم المنتج أو رقمه">
+      </div>
+
+      <div class="col-md-6">
+        <label class="form-label fw-bold">📦 الكمية</label>
+        <input type="number" name="quantity" class="form-control" min="1" placeholder="أدخل الكمية">
+      </div>
+
+      <div class="col-md-12 mt-3">
+        <button type="submit" class="btn btn-custom w-100">➕ إضافة البيع</button>
+      </div>
+
+    </form>
+
+  </div>
+
+  <!-- سجل المبيعات -->
+  <h2 class="mt-5 text-light">📊 سجل المبيعات</h2>
+
+  <table class="table table-striped text-center mt-3">
+    <thead>
+      <tr>
+        <th>المنتج</th>
+        <th>الكمية</th>
+        <th>السعر الإجمالي</th>
+        <th>التاريخ</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for sale in sales %}
+      <tr>
+        <td>{{ sale.product.name }}</td>
+        <td>{{ sale.quantity }}</td>
+        <td>{{ sale.total_price }}</td>
+        <td>{{ sale.created_at.strftime('%Y-%m-%d %H:%M') }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+
+  <a href="/" class="btn btn-secondary mt-3">⬅️ الرجوع للصفحة الرئيسية</a>
+
+</div>
+
+</body>
+</html>
+
+
+
